@@ -8,16 +8,12 @@ from flask import (
     Flask, flash, redirect, render_template_string,
     request, session, url_for
 )
+from werkzeug.security import check_password_hash, generate_password_hash
 
 SECRET_KEY = os.environ.get("SECRET_KEY")
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 
-if not SECRET_KEY or not ADMIN_USERNAME or not ADMIN_PASSWORD:
-    raise RuntimeError(
-        "Itakda ang SECRET_KEY, ADMIN_USERNAME, at ADMIN_PASSWORD "
-        "sa environment variables."
-    )
+if not SECRET_KEY:
+    raise RuntimeError("Itakda ang SECRET_KEY sa environment variables.")
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -48,6 +44,7 @@ def init_db():
                 balance REAL NOT NULL
             )
         """)
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,12 +57,22 @@ def init_db():
             )
         """)
 
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         columns = {
             row["name"]
             for row in db.execute(
                 "PRAGMA table_info(transactions)"
             ).fetchall()
         }
+
         if "balance_after" not in columns:
             db.execute(
                 "ALTER TABLE transactions ADD COLUMN balance_after REAL"
@@ -81,6 +88,7 @@ def init_db():
                 "INSERT INTO settings (id, balance) VALUES (1, ?)",
                 (initial_balance,)
             )
+
             now = datetime.now().isoformat(timespec="seconds")
             db.executemany("""
                 INSERT INTO transactions
@@ -188,9 +196,7 @@ body {
   font: 14px "Segoe UI", Arial, sans-serif;
 }
 a { color: inherit; text-decoration: none; }
-button, input, select {
-  font: inherit;
-}
+button, input, select { font: inherit; }
 .topbar {
   max-width: 1440px; margin: auto; padding: 18px 26px;
   display: flex; align-items: center; gap: 24px;
@@ -318,7 +324,11 @@ th { color:var(--muted); font-size:11px; }
     <div class="login-inner">
       <h1>Welcome back</h1>
       <p class="subtitle">Sign in to continue to your dashboard.</p>
-      {% for message in get_flashed_messages() %}<div class="flash">{{ message }}</div>{% endfor %}
+
+      {% for message in get_flashed_messages() %}
+        <div class="flash">{{ message }}</div>
+      {% endfor %}
+
       <form method="post">
         <label>USERNAME</label>
         <input name="username" required autofocus>
@@ -329,11 +339,19 @@ th { color:var(--muted); font-size:11px; }
           Show password
         </label>
         <button class="button purple" type="submit" style="width:100%;margin-top:16px">SIGN IN →</button>
+
+        <a class="button"
+           href="{{ url_for('register') }}"
+           style="display:block; text-align:center; width:100%; margin-top:10px; background:#20314B;">
+          CREATE ACCOUNT
+        </a>
       </form>
+
       <p class="muted" style="text-align:center;margin-top:22px">Secure access to your KASH OUT account</p>
     </div>
   </section>
 </div>
+
 <script>
 function togglePassword() {
   const box = document.getElementById("password");
@@ -567,6 +585,64 @@ function closeModal(event, id) {
 </html>
 """
 
+REGISTER_PAGE = """
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create Account — KASH OUT</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #080D18; color: #F4F6FC;
+    font: 14px "Segoe UI", Arial, sans-serif;
+  }
+  .card {
+    width: min(380px, calc(100% - 40px)); padding: 28px;
+    background: #101A2B; border: 1px solid #293951; border-radius: 12px;
+  }
+  h1 { margin-top: 0; }
+  p, label { color: #9BAAC2; }
+  label { display: block; margin: 14px 0 6px; }
+  input {
+    box-sizing: border-box; width: 100%; padding: 11px;
+    border: 0; border-radius: 6px; background: #20314B; color: #F4F6FC;
+  }
+  button, a {
+    display: inline-block; box-sizing: border-box; width: 100%;
+    margin-top: 16px; padding: 11px; border: 0; border-radius: 7px;
+    background: #8055F6; color: white; text-align: center;
+    text-decoration: none; font-weight: bold; cursor: pointer;
+  }
+  a { background: #20314B; }
+  .flash { padding: 10px; background: #263954; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>Create Account</h1>
+    <p>Register to sign in to KASH OUT.</p>
+
+    {% for message in get_flashed_messages() %}
+      <div class="flash">{{ message }}</div>
+    {% endfor %}
+
+    <form method="post">
+      <label for="username">USERNAME</label>
+      <input id="username" name="username" minlength="3" maxlength="32" required autofocus>
+      <label for="password">PASSWORD (at least 12 characters)</label>
+      <input id="password" name="password" type="password" minlength="12" required>
+      <label for="confirm_password">CONFIRM PASSWORD</label>
+      <input id="confirm_password" name="confirm_password" type="password" required>
+      <button type="submit">CREATE ACCOUNT</button>
+    </form>
+
+    <a href="{{ url_for('login') }}">Back to Sign In</a>
+  </main>
+</body>
+</html>
+"""
 
 NAV_ITEMS = [
     ("Dashboard", "Dashboard"),
@@ -615,13 +691,67 @@ def page_view(page_name):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form.get("username", "")
+        username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+
+        with connect_db() as db:
+            user = db.execute(
+                "SELECT id, username, password_hash FROM users WHERE username = ?",
+                (username,)
+            ).fetchone()
+
+        if user and check_password_hash(user["password_hash"], password):
+            session.clear()
             session["logged_in"] = True
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
             return redirect(url_for("home"))
+
         flash("The username or password is incorrect.")
+
     return render_template_string(PAGE, page="login", logged_in=False)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if len(username) < 3 or len(username) > 32:
+            flash("Username must be between 3 and 32 characters.")
+            return render_template_string(REGISTER_PAGE)
+
+        if len(password) < 12:
+            flash("Password must be at least 12 characters.")
+            return render_template_string(REGISTER_PAGE)
+
+        if password != confirm_password:
+            flash("The passwords do not match.")
+            return render_template_string(REGISTER_PAGE)
+
+        try:
+            with connect_db() as db:
+                db.execute(
+                    """
+                    INSERT INTO users (username, password_hash, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        username,
+                        generate_password_hash(password),
+                        datetime.now().isoformat(timespec="seconds")
+                    )
+                )
+        except sqlite3.IntegrityError:
+            flash("That username is already in use.")
+            return render_template_string(REGISTER_PAGE)
+
+        flash("Account created. You can now sign in.")
+        return redirect(url_for("login"))
+
+    return render_template_string(REGISTER_PAGE)
 
 
 @app.route("/logout")
